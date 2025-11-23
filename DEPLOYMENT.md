@@ -129,6 +129,14 @@ After deployment, monitor your service:
 
 ## Troubleshooting
 
+### Build fails with aiohttp compilation errors
+**Problem:** `error: 'PyLongObject' has no member named 'ob_digit'`
+
+**Solution:** This was fixed in the latest version:
+- We upgraded `aiohttp` from 3.8.3 to 3.11.11 (Python 3.13 compatible)
+- Specified `runtime: python-3.11` in `render.yaml` for consistency
+- Both changes ensure compatibility across Python versions
+
 ### Service fails to start
 - Check the logs in Render dashboard
 - Verify all dependencies in `requirements.txt` are correct

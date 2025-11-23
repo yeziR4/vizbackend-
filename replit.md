@@ -132,6 +132,7 @@ The server will start on `http://0.0.0.0:5000`
 - Comprehensive error handling per league and per match
 
 ## Recent Changes
+- 2024-11-23: Fixed Render deployment by upgrading aiohttp to 3.11.11 (Python 3.13 compatible)
 - 2024-11-23: Added individual league endpoints for faster, one-at-a-time fetching
 - 2024-11-23: Initial setup with multi-league support and Render deployment configuration
 
