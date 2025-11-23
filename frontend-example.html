@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Football Goals API - Frontend Integration Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        .league-buttons {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            font-size: 18px;
+            color: #666;
+        }
+        .loading.active {
+            display: block;
+        }
+        .results {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-top: 20px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .stat-card h3 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #666;
+        }
+        .stat-card .value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .goal-item {
+            border-bottom: 1px solid #eee;
+            padding: 10px 0;
+        }
+        .goal-item:last-child {
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>⚽ Football Goals API - Integration Example</h1>
+    
+    <p><strong>API Base URL:</strong> <span id="apiUrl">http://localhost:5000</span> (Update this to your Render URL when deployed)</p>
+    
+    <div class="league-buttons">
+        <button onclick="fetchLeague('epl')">🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League</button>
+        <button onclick="fetchLeague('la_liga')">🇪🇸 La Liga</button>
+        <button onclick="fetchLeague('bundesliga')">🇩🇪 Bundesliga</button>
+        <button onclick="fetchLeague('serie_a')">🇮🇹 Serie A</button>
+        <button onclick="fetchLeague('ligue_1')">🇫🇷 Ligue 1</button>
+    </div>
+
+    <div class="loading" id="loading">
+        <p>⏳ Fetching data... This may take 2-3 minutes.</p>
+        <p>Processing hundreds of matches...</p>
+    </div>
+
+    <div id="results"></div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:5000'; // Change to your deployed URL
+
+        async function fetchLeague(league) {
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            const buttons = document.querySelectorAll('button');
+            
+            // Disable all buttons and show loading
+            buttons.forEach(btn => btn.disabled = true);
+            loading.classList.add('active');
+            results.innerHTML = '';
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/goals/${league}?season=2024`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                displayResults(data, league);
+                
+            } catch (error) {
+                results.innerHTML = `
+                    <div class="error">
+                        <strong>Error:</strong> ${error.message}
+                        <br><br>
+                        Make sure the API server is running and accessible.
+                    </div>
+                `;
+            } finally {
+                loading.classList.remove('active');
+                buttons.forEach(btn => btn.disabled = false);
+            }
+        }
+
+        function displayResults(data, league) {
+            const results = document.getElementById('results');
+            const leagueNames = {
+                'epl': 'English Premier League',
+                'la_liga': 'Spanish La Liga',
+                'bundesliga': 'German Bundesliga',
+                'serie_a': 'Italian Serie A',
+                'ligue_1': 'French Ligue 1'
+            };
+
+            let html = `
+                <div class="results">
+                    <h2>${leagueNames[league]} - ${data.season}</h2>
+                    
+                    <div class="stats">
+                        <div class="stat-card">
+                            <h3>Total Goals</h3>
+                            <div class="value">${data.total_goals}</div>
+                        </div>
+                        <div class="stat-card">
+                            <h3>Total Matches</h3>
+                            <div class="value">${data.total_matches}</div>
+                        </div>
+                        <div class="stat-card">
+                            <h3>Goals per Match</h3>
+                            <div class="value">${(data.total_goals / data.total_matches).toFixed(2)}</div>
+                        </div>
+                    </div>
+
+                    <h3>Sample Goals (First 10):</h3>
+                    <div class="goals-list">
+            `;
+
+            // Display first 10 goals
+            const sampleGoals = data.goals.slice(0, 10);
+            sampleGoals.forEach(goal => {
+                html += `
+                    <div class="goal-item">
+                        <strong>${goal.player}</strong> (${goal.team})
+                        <br>
+                        Minute: ${goal.minute}' | xG: ${goal.xg.toFixed(2)} | 
+                        Type: ${goal.shotType} | Situation: ${goal.situation}
+                        <br>
+                        <small>vs ${goal.opponent} on ${goal.match_date}</small>
+                    </div>
+                `;
+            });
+
+            html += `
+                    </div>
+                    <p><small>Showing ${sampleGoals.length} of ${data.total_goals} goals</small></p>
+                </div>
+            `;
+
+            results.innerHTML = html;
+        }
+
+        // Show API info on load
+        window.addEventListener('DOMContentLoaded', async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/`);
+                const data = await response.json();
+                console.log('API Info:', data);
+            } catch (error) {
+                console.error('Could not connect to API:', error);
+            }
+        });
+    </script>
+</body>
+</html>

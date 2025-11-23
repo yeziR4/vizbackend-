@@ -101,9 +101,16 @@ def home():
     return jsonify({
         'message': 'Football Goals API',
         'endpoints': {
-            '/api/goals': 'Get goals from all leagues',
-            '/api/goals?leagues=epl,la_liga': 'Get goals from specific leagues',
-            '/api/goals?season=2024': 'Get goals from specific season (default: 2024)'
+            '/api/goals': 'Get goals from all leagues (can take 5-10 minutes)',
+            '/api/goals/<league>': 'Get goals from a specific league (faster, ~2 minutes)',
+            '/api/goals/<league>?season=2024': 'Get goals from specific league and season'
+        },
+        'individual_league_endpoints': {
+            '/api/goals/epl': 'English Premier League',
+            '/api/goals/la_liga': 'Spanish La Liga',
+            '/api/goals/bundesliga': 'German Bundesliga',
+            '/api/goals/serie_a': 'Italian Serie A',
+            '/api/goals/ligue_1': 'French Ligue 1'
         },
         'available_leagues': list(LEAGUE_CODES.keys())
     })
@@ -155,6 +162,48 @@ def get_goals():
         
     except Exception as e:
         logger.error(f"Error in /api/goals: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        loop.close()
+
+@app.route('/api/goals/<league>', methods=['GET'])
+def get_league_goals(league):
+    """Endpoint to fetch goals data for a specific league"""
+    if league not in LEAGUE_CODES:
+        return jsonify({
+            'error': f'Invalid league: {league}',
+            'available_leagues': list(LEAGUE_CODES.keys())
+        }), 404
+    
+    season = request.args.get('season', '2024', type=int)
+    logger.info(f"Fetching goals for {league}, season {season}")
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        results = loop.run_until_complete(fetch_all_leagues(season, [league]))
+        
+        if not results:
+            return jsonify({'error': 'No data found'}), 500
+        
+        result = results[0]
+        
+        response = {
+            'league': result['league'],
+            'season': f"{season}-{season+1}",
+            'total_goals': result['total_goals'],
+            'total_matches': result['total_matches'],
+            'goals': result['goals']
+        }
+        
+        if 'error' in result:
+            response['error'] = result['error']
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        logger.error(f"Error in /api/goals/{league}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         loop.close()

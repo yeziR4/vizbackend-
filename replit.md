@@ -16,7 +16,9 @@ A Flask-based REST API that fetches goal data from 5 major European football lea
 Returns API information and available endpoints.
 
 ### GET /api/goals
-Fetches goals data from all or specified leagues.
+Fetches goals data from all leagues or multiple leagues.
+
+⚠️ **Warning:** This endpoint can take 5-10 minutes when fetching all leagues. Consider using individual league endpoints instead.
 
 **Query Parameters:**
 - `season` (optional, default: 2024): The starting year of the season (e.g., 2024 for 2024-2025 season)
@@ -27,7 +29,6 @@ Fetches goals data from all or specified leagues.
 GET /api/goals
 GET /api/goals?season=2024
 GET /api/goals?leagues=epl,la_liga
-GET /api/goals?season=2024&leagues=bundesliga,serie_a,ligue_1
 ```
 
 **Response Format:**
@@ -42,6 +43,37 @@ GET /api/goals?season=2024&leagues=bundesliga,serie_a,ligue_1
     },
     ...
   },
+  "goals": [...]
+}
+```
+
+### GET /api/goals/:league
+**Recommended:** Fetches goals data from a specific league (much faster, ~2 minutes).
+
+**Available League Routes:**
+- `/api/goals/epl` - English Premier League
+- `/api/goals/la_liga` - Spanish La Liga
+- `/api/goals/bundesliga` - German Bundesliga
+- `/api/goals/serie_a` - Italian Serie A
+- `/api/goals/ligue_1` - French Ligue 1
+
+**Query Parameters:**
+- `season` (optional, default: 2024): The starting year of the season
+
+**Examples:**
+```
+GET /api/goals/epl
+GET /api/goals/la_liga?season=2024
+GET /api/goals/bundesliga?season=2023
+```
+
+**Response Format:**
+```json
+{
+  "league": "epl",
+  "season": "2024-2025",
+  "total_goals": 250,
+  "total_matches": 100,
   "goals": [
     {
       "id": "123456",
@@ -100,4 +132,8 @@ The server will start on `http://0.0.0.0:5000`
 - Comprehensive error handling per league and per match
 
 ## Recent Changes
+- 2024-11-23: Added individual league endpoints for faster, one-at-a-time fetching
 - 2024-11-23: Initial setup with multi-league support and Render deployment configuration
+
+## User Preferences
+- Prefers fetching leagues one at a time instead of all at once for better performance and user experience
