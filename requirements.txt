@@ -1,5 +1,5 @@
 Flask
 Flask-CORS
-aiohttp
+aiohttp==3.9.5
 understat
 gunicorn
