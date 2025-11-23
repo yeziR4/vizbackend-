@@ -20,7 +20,7 @@ LEAGUE_CODES = {
     'ligue_1': 'Ligue_1'
 }
 
-async def fetch_league_goals(session, league_code, league_name, season_year=2024):
+async def fetch_league_goals(session, league_code, league_name, season_year=2025):
     """Fetch all goals for a specific league and season"""
     try:
         understat = Understat(session)
@@ -28,7 +28,7 @@ async def fetch_league_goals(session, league_code, league_name, season_year=2024
         
         goals_data = []
         
-        results = await understat.get_league_results(league_code, season_year)
+        results = await understat.get_league_results(league_code, str(season_year))
         logger.info(f"Found {len(results)} matches for {league_name}")
         
         for idx, match in enumerate(results, 1):
@@ -36,7 +36,7 @@ async def fetch_league_goals(session, league_code, league_name, season_year=2024
             match_date = match.get('datetime', 'Unknown date')
             
             try:
-                shots = await understat.get_match_shots(match_id)
+                shots = await understat.get_match_shots(str(match_id))
                 all_shots = shots['h'] + shots['a']
                 
                 for shot in all_shots:
@@ -81,7 +81,7 @@ async def fetch_league_goals(session, league_code, league_name, season_year=2024
             'error': str(e)
         }
 
-async def fetch_all_leagues(season_year=2024, leagues=None):
+async def fetch_all_leagues(season_year=2025, leagues=None):
     """Fetch goals from all specified leagues in parallel"""
     if leagues is None:
         leagues = list(LEAGUE_CODES.keys())
@@ -118,7 +118,7 @@ def home():
 @app.route('/api/goals', methods=['GET'])
 def get_goals():
     """Endpoint to fetch goals data"""
-    season = request.args.get('season', '2024', type=int)
+    season = request.args.get('season', '2025', type=int)
     leagues_param = request.args.get('leagues', None)
     
     leagues = None
