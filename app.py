@@ -5,6 +5,7 @@ import aiohttp
 from understat import Understat
 
 app = Flask(__name__)
+CORS(app)
 
 # -------------------------------------------------------------
 # Configuration
