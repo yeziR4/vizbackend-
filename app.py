@@ -9,13 +9,25 @@ app = Flask(__name__)
 # -------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------
-DEFAULT_SEASON = "2025"     # always use string
+DEFAULT_SEASON = "2025"
 LEAGUE_MAP = {
     "epl": ("EPL", "Premier League"),
     "laliga": ("La_liga", "La Liga"),
     "bundesliga": ("Bundesliga", "Bundesliga"),
     "seriea": ("Serie_A", "Serie A"),
     "ligue1": ("Ligue_1", "Ligue 1"),
+}
+
+# URL alias mapping - maps URL formats to LEAGUE_MAP keys
+URL_ALIASES = {
+    "epl": "epl",
+    "la_liga": "laliga",
+    "laliga": "laliga",
+    "bundesliga": "bundesliga",
+    "serie_a": "seriea",
+    "seriea": "seriea",
+    "ligue_1": "ligue1",
+    "ligue1": "ligue1",
 }
 # -------------------------------------------------------------
 
@@ -69,7 +81,7 @@ async def fetch_league_goals(session, league_code, league_name, season):
                 "match_date": match.get("datetime"),
             })
 
-        await asyncio.sleep(0.2)  # be nice to Understat
+        await asyncio.sleep(0.2)
 
     print(f"✅ {league_name}: collected {len(all_goals)} goals")
     return {"league": league_name, "goals": all_goals, "error": None}
@@ -107,7 +119,6 @@ def api_goals():
     else:
         leagues = list(LEAGUE_MAP.keys())
 
-    # run async safely inside Flask
     results = asyncio.run(fetch_all_leagues(season, leagues))
     return jsonify({"season": season, "data": results})
 
@@ -116,9 +127,21 @@ def api_goals():
 def api_single_league(league):
     season = str(request.args.get("season", DEFAULT_SEASON))
 
-    league_key = league.lower()
+    # Normalize the league URL to the LEAGUE_MAP key
+    league_url = league.lower()
+    
+    # Check if it's an alias first
+    if league_url in URL_ALIASES:
+        league_key = URL_ALIASES[league_url]
+    else:
+        league_key = league_url
+    
+    # Now check if the normalized key exists
     if league_key not in LEAGUE_MAP:
-        return jsonify({"error": "Unknown league"}), 400
+        return jsonify({
+            "error": f"Unknown league: {league}",
+            "valid_leagues": list(URL_ALIASES.keys())
+        }), 400
 
     results = asyncio.run(fetch_all_leagues(season, [league_key]))
     return jsonify({"season": season, "data": results[0]})
