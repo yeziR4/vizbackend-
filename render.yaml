@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: football-goals-api
+    name: football
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 300 app:app
-    runtime: python3
-
+    startCommand: gunicorn --config gunicorn.conf.py app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
