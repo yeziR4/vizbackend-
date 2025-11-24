@@ -3,6 +3,7 @@ import json
 from flask import Flask, jsonify, request
 import aiohttp
 from understat import Understat
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
