@@ -4,13 +4,15 @@ from flask import Flask, jsonify, request
 import aiohttp
 from understat import Understat
 from flask_cors import CORS
+import time
 
 app = Flask(__name__)
 CORS(app)
 
-# -------------------------------------------------------------
-# Configuration
-# -------------------------------------------------------------
+# Simple in-memory cache
+cache = {}
+CACHE_DURATION = 3600  # 1 hour in seconds
+
 DEFAULT_SEASON = "2025"
 LEAGUE_MAP = {
     "epl": ("EPL", "Premier League"),
@@ -20,7 +22,6 @@ LEAGUE_MAP = {
     "ligue1": ("Ligue_1", "Ligue 1"),
 }
 
-# URL alias mapping - maps URL formats to LEAGUE_MAP keys
 URL_ALIASES = {
     "epl": "epl",
     "la_liga": "laliga",
@@ -31,8 +32,25 @@ URL_ALIASES = {
     "ligue_1": "ligue1",
     "ligue1": "ligue1",
 }
-# -------------------------------------------------------------
 
+def get_cache_key(season, league_key):
+    """Generate cache key"""
+    return f"{season}_{league_key}"
+
+def get_from_cache(cache_key):
+    """Get data from cache if not expired"""
+    if cache_key in cache:
+        data, timestamp = cache[cache_key]
+        if time.time() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache HIT for {cache_key}")
+            return data
+    print(f"❌ Cache MISS for {cache_key}")
+    return None
+
+def save_to_cache(cache_key, data):
+    """Save data to cache with timestamp"""
+    cache[cache_key] = (data, time.time())
+    print(f"💾 Cached {cache_key}")
 
 # -------------------------------------------------------------
 # Core async worker: fetch goals for a single league
@@ -61,7 +79,6 @@ async def fetch_league_goals(session, league_code, league_name, season):
             print(f"⚠️ Could not fetch shots for match {match_id}: {e}")
             continue
 
-        # merge home + away
         all_shots = shots["h"] + shots["a"]
 
         for shot in all_shots:
@@ -89,9 +106,6 @@ async def fetch_league_goals(session, league_code, league_name, season):
     return {"league": league_name, "goals": all_goals, "error": None}
 
 
-# -------------------------------------------------------------
-# Fetch all leagues in parallel
-# -------------------------------------------------------------
 async def fetch_all_leagues(season, leagues=None):
     season = str(season)
 
@@ -129,28 +143,36 @@ def api_goals():
 def api_single_league(league):
     season = str(request.args.get("season", DEFAULT_SEASON))
 
-    # Normalize the league URL to the LEAGUE_MAP key
     league_url = league.lower()
     
-    # Check if it's an alias first
     if league_url in URL_ALIASES:
         league_key = URL_ALIASES[league_url]
     else:
         league_key = league_url
     
-    # Now check if the normalized key exists
     if league_key not in LEAGUE_MAP:
         return jsonify({
             "error": f"Unknown league: {league}",
             "valid_leagues": list(URL_ALIASES.keys())
         }), 400
 
+    # Check cache first
+    cache_key = get_cache_key(season, league_key)
+    cached_data = get_from_cache(cache_key)
+    
+    if cached_data is not None:
+        return jsonify(cached_data)
+
+    # Fetch fresh data
+    print(f"🔄 Fetching fresh data for {league_key}...")
     results = asyncio.run(fetch_all_leagues(season, [league_key]))
-    return jsonify({"season": season, "data": results[0]})
+    response_data = {"season": season, "data": results[0]}
+    
+    # Save to cache
+    save_to_cache(cache_key, response_data)
+    
+    return jsonify(response_data)
 
 
-# -------------------------------------------------------------
-# Run server
-# -------------------------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
