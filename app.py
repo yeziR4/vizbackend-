@@ -114,6 +114,8 @@ async def fetch_league_goals(session, league_code, league_name, season):
                 "situation": shot.get("situation", "Unknown"),
                 "shotType": shot.get("shotType", "Unknown"),
                 "match_date": match.get("datetime"),
+                "home_team": match.get("h", {}).get("title"),
+                "away_team": match.get("a", {}).get("title"),
             })
 
         await asyncio.sleep(0.2)
@@ -141,6 +143,115 @@ async def fetch_all_leagues(season, leagues=None):
 # -------------------------------------------------------------
 # Highlights API Integration
 # -------------------------------------------------------------
+async def fetch_match_highlights_by_teams(home_team, away_team, date=None):
+    """Fetch highlights for a specific match by team names"""
+    
+    url = f"{HIGHLIGHTLY_BASE_URL}/highlights"
+    
+    headers = {
+        "Authorization": f"Bearer {HIGHLIGHTLY_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    params = {
+        "homeTeamName": home_team,
+        "awayTeamName": away_team,
+        "limit": 10
+    }
+    
+    if date:
+        params["date"] = date
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get("data", [])
+                else:
+                    return []
+    except Exception as e:
+        print(f"⚠️ Error fetching match highlights: {e}")
+        return []
+
+
+async def enrich_goals_with_highlights(goals, league_key):
+    """Enrich goal data with match highlights"""
+    
+    # Group goals by match
+    matches = {}
+    for goal in goals:
+        match_key = f"{goal.get('home_team')}_{goal.get('away_team')}_{goal.get('match_date')}"
+        if match_key not in matches:
+            matches[match_key] = {
+                "home_team": goal.get("home_team"),
+                "away_team": goal.get("away_team"),
+                "date": goal.get("match_date", "").split("T")[0] if goal.get("match_date") else None,
+                "goals": []
+            }
+        matches[match_key]["goals"].append(goal)
+    
+    print(f"🎬 Enriching {len(goals)} goals from {len(matches)} matches with highlights...")
+    
+    # Fetch highlights for each match
+    highlights_cache = {}
+    
+    for match_key, match_data in matches.items():
+        home = match_data["home_team"]
+        away = match_data["away_team"]
+        date = match_data["date"]
+        
+        if not home or not away:
+            continue
+        
+        cache_key = f"{home}_{away}_{date}"
+        
+        if cache_key not in highlights_cache:
+            highlights = await fetch_match_highlights_by_teams(home, away, date)
+            highlights_cache[cache_key] = highlights
+            await asyncio.sleep(0.1)  # Rate limiting
+        
+        # Add highlights to each goal in this match
+        match_highlights = highlights_cache[cache_key]
+        
+        for goal in match_data["goals"]:
+            goal["match_highlights"] = match_highlights
+            
+            # Try to find goal-specific highlights
+            goal["goal_highlights"] = []
+            player_name = goal.get("player", "").lower()
+            minute = goal.get("minute", 0)
+            
+            for highlight in match_highlights:
+                title = highlight.get("title", "").lower()
+                description = highlight.get("description", "").lower()
+                
+                # Check if highlight mentions this player or minute
+                if player_name in title or player_name in description:
+                    goal["goal_highlights"].append({
+                        "id": highlight.get("id"),
+                        "title": highlight.get("title"),
+                        "url": highlight.get("url"),
+                        "embedUrl": highlight.get("embedUrl"),
+                        "source": highlight.get("source"),
+                        "type": highlight.get("type"),
+                        "relevance": "player_match"
+                    })
+                elif f"{int(minute)}'" in title or f"{int(minute)} min" in title.lower():
+                    goal["goal_highlights"].append({
+                        "id": highlight.get("id"),
+                        "title": highlight.get("title"),
+                        "url": highlight.get("url"),
+                        "embedUrl": highlight.get("embedUrl"),
+                        "source": highlight.get("source"),
+                        "type": highlight.get("type"),
+                        "relevance": "minute_match"
+                    })
+    
+    print(f"✅ Enrichment complete")
+    return goals
+
+
 async def fetch_league_highlights(league_key, date=None, limit=40):
     """Fetch highlights for a specific league"""
     
@@ -255,6 +366,7 @@ def api_goals():
 def api_single_league(league):
     season = str(request.args.get("season", DEFAULT_SEASON))
     force_refresh = request.args.get("refresh", "false").lower() == "true"
+    include_highlights = request.args.get("highlights", "false").lower() == "true"
 
     league_url = league.lower()
     
@@ -269,7 +381,7 @@ def api_single_league(league):
             "valid_leagues": list(URL_ALIASES.keys())
         }), 400
 
-    cache_key = get_cache_key(season, league_key, "goals")
+    cache_key = get_cache_key(season, league_key, "goals_with_highlights" if include_highlights else "goals")
     
     # Skip cache if force refresh
     if not force_refresh:
@@ -280,6 +392,13 @@ def api_single_league(league):
     # Fetch fresh data
     print(f"🔄 Fetching fresh data for {league_key}...")
     results = asyncio.run(fetch_all_leagues(season, [league_key]))
+    
+    # Enrich with highlights if requested
+    if include_highlights and results[0].get("goals"):
+        goals = results[0]["goals"]
+        enriched_goals = asyncio.run(enrich_goals_with_highlights(goals, league_key))
+        results[0]["goals"] = enriched_goals
+    
     response_data = {"season": season, "data": results[0]}
     
     # Save to cache
