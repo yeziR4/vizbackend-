@@ -52,34 +52,49 @@ URL_ALIASES = {
 # Load mock data from JSON file
 def load_mock_data():
     """Load mock data from JSON file"""
-    try:
-        # Try the premier league real data file first
-        premier_league_file = os.path.join(os.path.dirname(__file__), 'premier_league_goals_2025_2026.json')
-        with open(premier_league_file, 'r') as f:
-            data = json.load(f)
-            print(f"✅ Loaded Premier League data from JSON file")
-            # Convert to our format
-            goals = data if isinstance(data, list) else data.get("goals", [])
-            return {
-                "epl": {
-                    "league": "Premier League",
-                    "goals": goals,
-                    "is_mock": False  # This is real data!
-                }
-            }
-    except FileNotFoundError:
-        print("⚠️ premier_league_goals_2025_2026.json not found")
-        # Fallback to mock_data.json
+    # List of possible filenames to try
+    possible_files = [
+        'premier_league_goals_2025_2026 (2).json',
+        'premier_league_goals_2025_2026.json',
+        'mock_data.json'
+    ]
+    
+    for filename in possible_files:
         try:
-            mock_file_path = os.path.join(os.path.dirname(__file__), 'mock_data.json')
-            with open(mock_file_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            print("⚠️ mock_data.json not found either, using empty data")
-            return {}
-    except json.JSONDecodeError as e:
-        print(f"⚠️ Error parsing JSON file: {e}")
-        return {}
+            file_path = os.path.join(os.path.dirname(__file__), filename)
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+                print(f"✅ Loaded data from {filename}")
+                
+                # Handle different data structures
+                if isinstance(data, list):
+                    # If it's just a list of goals
+                    goals = data
+                elif isinstance(data, dict):
+                    # If it has a structure already
+                    if "epl" in data:
+                        return data  # Already in correct format
+                    elif "goals" in data:
+                        goals = data["goals"]
+                    else:
+                        goals = data
+                else:
+                    goals = []
+                
+                # Return in our standard format
+                return {
+                    "epl": {
+                        "league": "Premier League",
+                        "goals": goals,
+                        "is_mock": False
+                    }
+                }
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"⚠️ Could not load {filename}: {e}")
+            continue
+    
+    print("⚠️ No data files found, returning empty mock data")
+    return {}
 
 MOCK_DATA = load_mock_data()
 
@@ -394,72 +409,76 @@ def get_data_summary():
     
     return summary
 
-async def ask_gemini(question, context_data=None):
-    """Ask Gemini AI a question with optional context"""
+async def ask_gemini_with_search(question):
+    """Ask Gemini with web search capabilities for all questions"""
     
     try:
-        # Initialize Gemini client (picks up GEMINI_API_KEY from environment)
+        # Initialize Gemini client
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # Build prompt with context
-        system_context = """You are a football analytics assistant with expertise in goal analysis. You have access to:
+        # Build a clean, professional prompt
+        system_context = """You are a professional football analytics expert. 
 
-1. Goal data from major European leagues (EPL, La Liga, Bundesliga, Serie A, Ligue 1)
-2. Each goal includes:
-   - Player name and team
-   - Opponent team
-   - xG (expected goals) - probability of scoring from that position
-   - Position on pitch (x, y coordinates where 0-1 scale)
-   - Minute of the goal
-   - Situation (OpenPlay, Penalty, SetPiece, FromCorner)
-   - Shot type (RightFoot, LeftFoot, Head)
+Key guidelines for your responses:
+- Provide clear, direct answers without preambles like "According to..."
+- Use clean formatting without asterisks or markdown symbols
+- Be precise and factual
+- Use web search to get current, accurate information
+- Present statistics and data professionally
+- Keep responses concise but informative
 
-Your capabilities:
-- Analyze patterns in goal data
-- Answer statistics questions
-- Provide tactical insights
-- Explain football analytics concepts
-
-When responding:
-- Be concise and insightful
-- Use data when available in context
-- If asked about current events/news/transfers, indicate you need web search
-- Explain your reasoning clearly
-"""
+When answering:
+- State facts directly
+- Use numbers and statistics when relevant
+- Provide context when needed
+- Be authoritative but accessible"""
         
-        user_prompt = f"{system_context}\n\nUser question: {question}"
+        user_prompt = f"{system_context}\n\nQuestion: {question}\n\nProvide a professional, well-formatted answer."
         
-        # Add context data if available
-        if context_data:
-            user_prompt += f"\n\nAvailable data:\n{json.dumps(context_data, indent=2)[:3000]}"  # Limit context size
-        
-        # Generate response using Gemini 2.5 Flash (free tier)
+        # Generate response with search grounding enabled
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=user_prompt
+            contents=user_prompt,
+            config={
+                "search_grounding": True  # Enable web search
+            }
         )
         
+        # Clean up the response text
         answer_text = response.text
         
-        # Detect if web search is needed
-        needs_web = any(keyword in question.lower() for keyword in [
-            "current", "latest", "recent", "today", "yesterday", "this week",
-            "news", "transfer", "injured", "who won", "score"
-        ]) or any(phrase in answer_text.lower() for phrase in [
-            "need more current", "require current", "web search", "real-time"
-        ])
+        # Remove common markdown symbols and clean formatting
+        answer_text = answer_text.replace("**", "")  # Remove bold
+        answer_text = answer_text.replace("*", "")   # Remove asterisks
+        answer_text = answer_text.replace("##", "")  # Remove headers
+        answer_text = answer_text.replace("#", "")   # Remove headers
+        
+        # Remove phrases like "According to the cache data"
+        phrases_to_remove = [
+            "According to the cache data,",
+            "Based on the cached data,",
+            "From the data provided,",
+            "According to the data,",
+            "Based on the available data,"
+        ]
+        for phrase in phrases_to_remove:
+            answer_text = answer_text.replace(phrase, "")
+        
+        # Clean up extra whitespace
+        answer_text = " ".join(answer_text.split())
+        answer_text = answer_text.strip()
         
         return {
             "answer": answer_text,
-            "needs_web_search": needs_web,
-            "data_used": context_data is not None
+            "search_used": True,
+            "data_used": False
         }
     
     except Exception as e:
         print(f"❌ Gemini API error: {e}")
         return {
-            "answer": f"Sorry, I encountered an error processing your question. Error: {str(e)}",
-            "needs_web_search": False,
+            "answer": f"I apologize, but I encountered an error: {str(e)}",
+            "search_used": False,
             "data_used": False,
             "error": str(e)
         }
@@ -541,10 +560,18 @@ def get_mock_data(league):
     else:
         league_key = league_url
     
+    # If we have loaded mock data, return it
     if league_key in MOCK_DATA:
         return jsonify({"season": DEFAULT_SEASON, "data": MOCK_DATA[league_key]})
-    else:
-        return jsonify({"error": "Mock data not available for this league"}), 404
+    
+    # Otherwise return a minimal fallback
+    fallback_data = {
+        "league": LEAGUE_MAP.get(league_key, ("Unknown", "Unknown"))[1],
+        "goals": [],
+        "is_mock": True,
+        "message": "Loading real data in background..."
+    }
+    return jsonify({"season": DEFAULT_SEASON, "data": fallback_data})
 
 
 # -------------------------------------------------------------
@@ -604,38 +631,16 @@ def api_match_highlights():
 # -------------------------------------------------------------
 @app.route("/api/ai/ask", methods=["POST"])
 def ai_ask():
-    """Ask the AI assistant a question"""
+    """Ask the AI assistant a question - now uses web search for all queries"""
     data = request.get_json()
     
     if not data or "question" not in data:
         return jsonify({"error": "Question is required"}), 400
     
     question = data["question"]
-    league = data.get("league")
-    include_data = data.get("includeData", True)
     
-    # Get relevant context data
-    context_data = None
-    if include_data:
-        context_data = {
-            "data_summary": get_data_summary()
-        }
-        
-        # If specific league is mentioned, include that data
-        if league and league in URL_ALIASES:
-            league_key = URL_ALIASES[league]
-            cache_key = get_cache_key(DEFAULT_SEASON, league_key, "goals")
-            cached = get_from_cache(cache_key)
-            
-            if cached:
-                goals = cached.get("data", {}).get("goals", [])
-                context_data["league_data"] = {
-                    "league": league_key,
-                    "total_goals": len(goals),
-                    "sample_goals": goals[:10]  # First 10 for context
-                }
-    
-    result = asyncio.run(ask_gemini(question, context_data))
+    # Use web search for all questions
+    result = asyncio.run(ask_gemini_with_search(question))
     return jsonify(result)
 
 
