@@ -53,26 +53,29 @@ URL_ALIASES = {
 def load_mock_data():
     """Load mock data from JSON file"""
     try:
-        # First try to load from local file
-        mock_file_path = os.path.join(os.path.dirname(__file__), 'mock_data.json')
-        with open(mock_file_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        # If local file not found, try the premier league file
-        try:
-            premier_league_file = os.path.join(os.path.dirname(__file__), 'premier_league_goals_2025_2026 (2).json')
-            with open(premier_league_file, 'r') as f:
-                data = json.load(f)
-                # Convert to our format
-                return {
-                    "epl": {
-                        "league": "Premier League",
-                        "goals": data if isinstance(data, list) else data.get("goals", []),
-                        "is_mock": False  # This is real data!
-                    }
+        # Try the premier league real data file first
+        premier_league_file = os.path.join(os.path.dirname(__file__), 'premier_league_goals_2025_2026.json')
+        with open(premier_league_file, 'r') as f:
+            data = json.load(f)
+            print(f"✅ Loaded Premier League data from JSON file")
+            # Convert to our format
+            goals = data if isinstance(data, list) else data.get("goals", [])
+            return {
+                "epl": {
+                    "league": "Premier League",
+                    "goals": goals,
+                    "is_mock": False  # This is real data!
                 }
+            }
+    except FileNotFoundError:
+        print("⚠️ premier_league_goals_2025_2026.json not found")
+        # Fallback to mock_data.json
+        try:
+            mock_file_path = os.path.join(os.path.dirname(__file__), 'mock_data.json')
+            with open(mock_file_path, 'r') as f:
+                return json.load(f)
         except FileNotFoundError:
-            print("⚠️ No mock data files found, using empty mock data")
+            print("⚠️ mock_data.json not found either, using empty data")
             return {}
     except json.JSONDecodeError as e:
         print(f"⚠️ Error parsing JSON file: {e}")
