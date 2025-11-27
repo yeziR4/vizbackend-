@@ -8,6 +8,7 @@ from flask_cors import CORS
 import time
 import datetime
 from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 CORS(app)
@@ -412,12 +413,17 @@ def get_data_summary():
 async def ask_gemini_with_search(question):
     """Ask Gemini with web search capabilities for all questions"""
     
-    try:
-        # Initialize Gemini client
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # Build a clean, professional prompt
-        system_context = """You are a professional football analytics expert. 
+    # We use exponential backoff to handle potential throttling from the API
+    max_retries = 5
+    initial_delay = 1
+    
+    for attempt in range(max_retries):
+        try:
+            # Initialize Gemini client
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            
+            # Build a clean, professional prompt
+            system_context = """You are a professional football analytics expert.
 
 Key guidelines for your responses:
 - Provide clear, direct answers without preambles like "According to..."
@@ -432,56 +438,70 @@ When answering:
 - Use numbers and statistics when relevant
 - Provide context when needed
 - Be authoritative but accessible"""
-        
-        user_prompt = f"{system_context}\n\nQuestion: {question}\n\nProvide a professional, well-formatted answer."
-        
-        # Generate response with search grounding enabled
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_prompt,
-            config={
-                "search_grounding": True  # Enable web search
+            
+            user_prompt = f"{system_context}\n\nQuestion: {question}\n\nProvide a professional, well-formatted answer."
+            
+            # Generate response with search grounding enabled
+            # FIX: Use types.GenerateContentConfig with the correct 'tools' structure
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=user_prompt,
+                config=types.GenerateContentConfig( # Correct class for config object
+                    tools=[{"googleSearch": {}}]  # Correct structure for enabling Google Search grounding
+                )
+            )
+            
+            # Clean up the response text
+            answer_text = response.text
+            
+            # Remove common markdown symbols and clean formatting
+            answer_text = answer_text.replace("**", "")  # Remove bold
+            answer_text = answer_text.replace("*", "")   # Remove asterisks
+            answer_text = answer_text.replace("##", "")  # Remove headers
+            answer_text = answer_text.replace("#", "")   # Remove headers
+            
+            # Remove phrases like "According to the cache data"
+            phrases_to_remove = [
+                "According to the cache data,",
+                "Based on the cached data,",
+                "From the data provided,",
+                "According to the data,",
+                "Based on the available data:" # Added colon version for safety
+            ]
+            for phrase in phrases_to_remove:
+                answer_text = answer_text.replace(phrase, "")
+            
+            # Clean up extra whitespace
+            answer_text = " ".join(answer_text.split())
+            answer_text = answer_text.strip()
+            
+            return {
+                "answer": answer_text,
+                "search_used": True,
+                "data_used": False
             }
-        )
         
-        # Clean up the response text
-        answer_text = response.text
-        
-        # Remove common markdown symbols and clean formatting
-        answer_text = answer_text.replace("**", "")  # Remove bold
-        answer_text = answer_text.replace("*", "")   # Remove asterisks
-        answer_text = answer_text.replace("##", "")  # Remove headers
-        answer_text = answer_text.replace("#", "")   # Remove headers
-        
-        # Remove phrases like "According to the cache data"
-        phrases_to_remove = [
-            "According to the cache data,",
-            "Based on the cached data,",
-            "From the data provided,",
-            "According to the data,",
-            "Based on the available data,"
-        ]
-        for phrase in phrases_to_remove:
-            answer_text = answer_text.replace(phrase, "")
-        
-        # Clean up extra whitespace
-        answer_text = " ".join(answer_text.split())
-        answer_text = answer_text.strip()
-        
-        return {
-            "answer": answer_text,
-            "search_used": True,
-            "data_used": False
-        }
-    
-    except Exception as e:
-        print(f"❌ Gemini API error: {e}")
-        return {
-            "answer": f"I apologize, but I encountered an error: {str(e)}",
-            "search_used": False,
-            "data_used": False,
-            "error": str(e)
-        }
+        except Exception as e:
+            if "Resource has been exhausted" in str(e) and attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                # print(f"Rate limit hit, retrying in {delay}s...") # Do not log retries as per instructions
+                await asyncio.sleep(delay)
+            else:
+                print(f"❌ Gemini API error: {e}")
+                return {
+                    "answer": f"I apologize, but I encountered an error: {str(e)}",
+                    "search_used": False,
+                    "data_used": False,
+                    "error": str(e)
+                }
+
+    # Should only be reached if all retries fail
+    return {
+        "answer": "I apologize, but the AI service is currently unavailable after multiple retry attempts.",
+        "search_used": False,
+        "data_used": False,
+        "error": "Failed after max retries"
+    }
 
 
 # -------------------------------------------------------------
