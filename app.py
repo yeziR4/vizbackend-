@@ -53,7 +53,7 @@ URL_ALIASES = {
 def load_mock_data():
     """Load mock data from JSON file"""
     try:
-        mock_file_path = os.path.join(os.path.dirname(__file__), 'mock_data.json')
+        mock_file_path = premier_league_goals_2025_2026 (2).json
         with open(mock_file_path, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
