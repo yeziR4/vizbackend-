@@ -53,14 +53,29 @@ URL_ALIASES = {
 def load_mock_data():
     """Load mock data from JSON file"""
     try:
-        mock_file_path = premier_league_goals_2025_2026 (2).json
+        # First try to load from local file
+        mock_file_path = os.path.join(os.path.dirname(__file__), 'mock_data.json')
         with open(mock_file_path, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        print("⚠️ mock_data.json not found, using empty mock data")
-        return {}
+        # If local file not found, try the premier league file
+        try:
+            premier_league_file = os.path.join(os.path.dirname(__file__), 'premier_league_goals_2025_2026 (2).json')
+            with open(premier_league_file, 'r') as f:
+                data = json.load(f)
+                # Convert to our format
+                return {
+                    "epl": {
+                        "league": "Premier League",
+                        "goals": data if isinstance(data, list) else data.get("goals", []),
+                        "is_mock": False  # This is real data!
+                    }
+                }
+        except FileNotFoundError:
+            print("⚠️ No mock data files found, using empty mock data")
+            return {}
     except json.JSONDecodeError as e:
-        print(f"⚠️ Error parsing mock_data.json: {e}")
+        print(f"⚠️ Error parsing JSON file: {e}")
         return {}
 
 MOCK_DATA = load_mock_data()
@@ -415,9 +430,9 @@ When responding:
         if context_data:
             user_prompt += f"\n\nAvailable data:\n{json.dumps(context_data, indent=2)[:3000]}"  # Limit context size
         
-        # Generate response using Gemini 2.0 Flash
+        # Generate response using Gemini 2.5 Flash (free tier)
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=user_prompt
         )
         
