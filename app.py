@@ -8,7 +8,6 @@ from flask_cors import CORS
 import time
 import datetime
 from google import genai
-from google.genai import types
 
 app = Flask(__name__)
 CORS(app)
@@ -124,11 +123,18 @@ def save_to_cache(cache_key, data):
 # -------------------------------------------------------------
 async def fetch_league_goals(session, league_code, league_name, season):
     understat = Understat(session)
+    
+    # Convert season to integer if it's a string
+    try:
+        season_int = int(season)
+    except (ValueError, TypeError):
+        print(f"⚠️ Invalid season value: {season}, using default 2025")
+        season_int = 2025
 
-    print(f"\n📌 Fetching {league_name} {season}-{int(season)+1}")
+    print(f"\n📌 Fetching {league_name} {season_int}-{season_int+1}")
 
     try:
-        results = await understat.get_league_results(league_code, season)
+        results = await understat.get_league_results(league_code, season_int)
     except Exception as e:
         print(f"❌ ERROR fetching results for {league_name}: {e}")
         return {"league": league_name, "goals": [], "error": str(e)}
@@ -176,7 +182,12 @@ async def fetch_league_goals(session, league_code, league_name, season):
 
 
 async def fetch_all_leagues(season, leagues=None):
-    season = str(season)
+    # Convert season to integer
+    try:
+        season_int = int(season)
+    except (ValueError, TypeError):
+        print(f"⚠️ Invalid season value: {season}, using default 2025")
+        season_int = 2025
 
     if leagues is None:
         leagues = list(LEAGUE_MAP.keys())
@@ -186,7 +197,7 @@ async def fetch_all_leagues(season, leagues=None):
 
         for league_key in leagues:
             code, name = LEAGUE_MAP[league_key]
-            tasks.append(fetch_league_goals(session, code, name, season))
+            tasks.append(fetch_league_goals(session, code, name, season_int))
 
         return await asyncio.gather(*tasks)
 
@@ -413,17 +424,12 @@ def get_data_summary():
 async def ask_gemini_with_search(question):
     """Ask Gemini with web search capabilities for all questions"""
     
-    # We use exponential backoff to handle potential throttling from the API
-    max_retries = 5
-    initial_delay = 1
-    
-    for attempt in range(max_retries):
-        try:
-            # Initialize Gemini client
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            
-            # Build a clean, professional prompt
-            system_context = """You are a professional football analytics expert.
+    try:
+        # Initialize Gemini client
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Build a clean, professional prompt
+        system_context = """You are a professional football analytics expert. 
 
 Key guidelines for your responses:
 - Provide clear, direct answers without preambles like "According to..."
@@ -438,70 +444,56 @@ When answering:
 - Use numbers and statistics when relevant
 - Provide context when needed
 - Be authoritative but accessible"""
-            
-            user_prompt = f"{system_context}\n\nQuestion: {question}\n\nProvide a professional, well-formatted answer."
-            
-            # Generate response with search grounding enabled
-            # FIX: Use types.GenerateContentConfig with the correct 'tools' structure
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=user_prompt,
-                config=types.GenerateContentConfig( # Correct class for config object
-                    tools=[{"googleSearch": {}}]  # Correct structure for enabling Google Search grounding
-                )
-            )
-            
-            # Clean up the response text
-            answer_text = response.text
-            
-            # Remove common markdown symbols and clean formatting
-            answer_text = answer_text.replace("**", "")  # Remove bold
-            answer_text = answer_text.replace("*", "")   # Remove asterisks
-            answer_text = answer_text.replace("##", "")  # Remove headers
-            answer_text = answer_text.replace("#", "")   # Remove headers
-            
-            # Remove phrases like "According to the cache data"
-            phrases_to_remove = [
-                "According to the cache data,",
-                "Based on the cached data,",
-                "From the data provided,",
-                "According to the data,",
-                "Based on the available data:" # Added colon version for safety
-            ]
-            for phrase in phrases_to_remove:
-                answer_text = answer_text.replace(phrase, "")
-            
-            # Clean up extra whitespace
-            answer_text = " ".join(answer_text.split())
-            answer_text = answer_text.strip()
-            
-            return {
-                "answer": answer_text,
-                "search_used": True,
-                "data_used": False
-            }
         
-        except Exception as e:
-            if "Resource has been exhausted" in str(e) and attempt < max_retries - 1:
-                delay = initial_delay * (2 ** attempt)
-                # print(f"Rate limit hit, retrying in {delay}s...") # Do not log retries as per instructions
-                await asyncio.sleep(delay)
-            else:
-                print(f"❌ Gemini API error: {e}")
-                return {
-                    "answer": f"I apologize, but I encountered an error: {str(e)}",
-                    "search_used": False,
-                    "data_used": False,
-                    "error": str(e)
-                }
-
-    # Should only be reached if all retries fail
-    return {
-        "answer": "I apologize, but the AI service is currently unavailable after multiple retry attempts.",
-        "search_used": False,
-        "data_used": False,
-        "error": "Failed after max retries"
-    }
+        user_prompt = f"{system_context}\n\nQuestion: {question}\n\nProvide a professional, well-formatted answer."
+        
+        # Generate response with search grounding enabled
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=user_prompt,
+            config={
+                "search_grounding": True  # Enable web search
+            }
+        )
+        
+        # Clean up the response text
+        answer_text = response.text
+        
+        # Remove common markdown symbols and clean formatting
+        answer_text = answer_text.replace("**", "")  # Remove bold
+        answer_text = answer_text.replace("*", "")   # Remove asterisks
+        answer_text = answer_text.replace("##", "")  # Remove headers
+        answer_text = answer_text.replace("#", "")   # Remove headers
+        
+        # Remove phrases like "According to the cache data"
+        phrases_to_remove = [
+            "According to the cache data,",
+            "Based on the cached data,",
+            "From the data provided,",
+            "According to the data,",
+            "Based on the available data,"
+        ]
+        for phrase in phrases_to_remove:
+            answer_text = answer_text.replace(phrase, "")
+        
+        # Clean up extra whitespace
+        answer_text = " ".join(answer_text.split())
+        answer_text = answer_text.strip()
+        
+        return {
+            "answer": answer_text,
+            "search_used": True,
+            "data_used": False
+        }
+    
+    except Exception as e:
+        print(f"❌ Gemini API error: {e}")
+        return {
+            "answer": f"I apologize, but I encountered an error: {str(e)}",
+            "search_used": False,
+            "data_used": False,
+            "error": str(e)
+        }
 
 
 # -------------------------------------------------------------
@@ -509,7 +501,13 @@ When answering:
 # -------------------------------------------------------------
 @app.route("/api/goals")
 def api_goals():
-    season = str(request.args.get("season", DEFAULT_SEASON))
+    # Get season and convert to integer, default to 2025
+    season_param = request.args.get("season", DEFAULT_SEASON)
+    try:
+        season = int(season_param)
+    except (ValueError, TypeError):
+        season = 2025
+    
     leagues = request.args.get("leagues")
 
     if leagues:
@@ -518,12 +516,18 @@ def api_goals():
         leagues = list(LEAGUE_MAP.keys())
 
     results = asyncio.run(fetch_all_leagues(season, leagues))
-    return jsonify({"season": season, "data": results})
+    return jsonify({"season": str(season), "data": results})
 
 
 @app.route("/api/goals/<league>")
 def api_single_league(league):
-    season = str(request.args.get("season", DEFAULT_SEASON))
+    # Get season and convert to integer, default to 2025
+    season_param = request.args.get("season", DEFAULT_SEASON)
+    try:
+        season = int(season_param)
+    except (ValueError, TypeError):
+        season = 2025
+    
     force_refresh = request.args.get("refresh", "false").lower() == "true"
     include_highlights = request.args.get("highlights", "false").lower() == "true"
     use_mock = request.args.get("mock", "false").lower() == "true"
@@ -544,9 +548,9 @@ def api_single_league(league):
     # Return mock data if requested
     if use_mock and league_key in MOCK_DATA:
         print(f"📦 Returning mock data for {league_key}")
-        return jsonify({"season": season, "data": MOCK_DATA[league_key]})
+        return jsonify({"season": str(season), "data": MOCK_DATA[league_key]})
 
-    cache_key = get_cache_key(season, league_key, "goals_with_highlights" if include_highlights else "goals")
+    cache_key = get_cache_key(str(season), league_key, "goals_with_highlights" if include_highlights else "goals")
     
     if not force_refresh:
         cached_data = get_from_cache(cache_key)
@@ -561,7 +565,7 @@ def api_single_league(league):
         enriched_goals = asyncio.run(enrich_goals_with_highlights(goals, league_key))
         results[0]["goals"] = enriched_goals
     
-    response_data = {"season": season, "data": results[0]}
+    response_data = {"season": str(season), "data": results[0]}
     save_to_cache(cache_key, response_data)
     
     return jsonify(response_data)
