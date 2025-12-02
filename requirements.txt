@@ -4,3 +4,6 @@ flask
 flask-cors
 understatapi
 google-genai
+selenium==4.2.0
+chromedriver-autoinstaller
+
