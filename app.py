@@ -1,41 +1,44 @@
-import asyncio
-import json
 import os
-from flask import Flask, jsonify, request
-import aiohttp
-from flask_cors import CORS
+import json
 import time
-import datetime
-from google import genai
+import traceback
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+
+# --- PATCH for Selenium set_headless issue (must run BEFORE understatapi import) ---
+# Some versions of understatapi call opts.set_headless(), which doesn't exist in newer Selenium.
+# This patch adds a set_headless method to Chrome Options if it is missing.
+try:
+    from selenium.webdriver.chrome.options import Options as _ChromeOptions
+    if not hasattr(_ChromeOptions, "set_headless"):
+        def _set_headless(self):
+            # modern selenium expects add_argument instead
+            self.add_argument("--headless")
+        _ChromeOptions.set_headless = _set_headless
+except Exception:
+    # If selenium isn't installed or import fails, ignore — this is just a defensive patch.
+    pass
+
+# Now import UnderstatClient safely
 from understatapi import UnderstatClient
 
+# Flask app
 app = Flask(__name__)
 CORS(app)
 
-# Simple in-memory cache
+# ---------- Simple in-memory cache ----------
 cache = {}
-CACHE_DURATION = 3600  # 1 hour in seconds
+CACHE_DURATION = int(os.environ.get("CACHE_DURATION_SECONDS", 60 * 60))  # default 1 hour
 
-# API Configuration
-HIGHLIGHTLY_API_KEY = os.environ.get("HIGHLIGHTLY_API_KEY", "your-api-key-here")
-HIGHLIGHTLY_BASE_URL = "https://api.highlightly.app/v1"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "your-gemini-api-key")
+# ---------- Config & maps ----------
+DEFAULT_SEASON = os.environ.get("DEFAULT_SEASON", "2025")
 
-DEFAULT_SEASON = "2025"  # Back to 2025 since understatapi supports it
 LEAGUE_MAP = {
     "epl": ("EPL", "Premier League"),
     "laliga": ("La_liga", "La Liga"),
     "bundesliga": ("Bundesliga", "Bundesliga"),
     "seriea": ("Serie_A", "Serie A"),
     "ligue1": ("Ligue_1", "Ligue 1"),
-}
-
-HIGHLIGHTS_LEAGUE_MAP = {
-    "epl": "Premier League",
-    "laliga": "LaLiga",
-    "bundesliga": "Bundesliga",
-    "seriea": "Serie A",
-    "ligue1": "Ligue 1",
 }
 
 URL_ALIASES = {
@@ -49,718 +52,219 @@ URL_ALIASES = {
     "ligue1": "ligue1",
 }
 
-# Load mock data from JSON file
+# Load mock data (optional)
 def load_mock_data():
-    """Load mock data from JSON file"""
-    # List of possible filenames to try
     possible_files = [
         'premier_league_goals_2025_2026 (2).json',
         'premier_league_goals_2025_2026.json',
         'mock_data.json'
     ]
-    
     for filename in possible_files:
         try:
             file_path = os.path.join(os.path.dirname(__file__), filename)
-            with open(file_path, 'r') as f:
+            with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                print(f"✅ Loaded data from {filename}")
-                
-                # Handle different data structures
+                if isinstance(data, dict) and "epl" in data:
+                    return data
+                # normalize to { "epl": { "league": "...", "goals": [..] } }
                 if isinstance(data, list):
-                    # If it's just a list of goals
                     goals = data
-                elif isinstance(data, dict):
-                    # If it has a structure already
-                    if "epl" in data:
-                        return data  # Already in correct format
-                    elif "goals" in data:
-                        goals = data["goals"]
-                    else:
-                        goals = data
+                elif isinstance(data, dict) and "goals" in data:
+                    goals = data["goals"]
                 else:
-                    goals = []
-                
-                # Return in our standard format
+                    goals = data
                 return {
                     "epl": {
                         "league": "Premier League",
                         "goals": goals,
-                        "is_mock": False
+                        "is_mock": True
                     }
                 }
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"⚠️ Could not load {filename}: {e}")
+        except Exception:
             continue
-    
-    print("⚠️ No data files found, returning empty mock data")
     return {}
 
 MOCK_DATA = load_mock_data()
 
-def get_cache_key(season, league_key, data_type="goals"):
-    """Generate cache key"""
-    return f"{season}_{league_key}_{data_type}"
+# ---------- Cache helpers ----------
+def get_cache_key(season, league_key):
+    return f"{season}_{league_key}_goals"
 
 def get_from_cache(cache_key):
-    """Get data from cache if not expired"""
-    if cache_key in cache:
-        data, timestamp = cache[cache_key]
-        if time.time() - timestamp < CACHE_DURATION:
-            age_minutes = int((time.time() - timestamp) / 60)
-            print(f"✅ Cache HIT for {cache_key} (age: {age_minutes} min)")
-            return data
-    print(f"❌ Cache MISS for {cache_key}")
+    item = cache.get(cache_key)
+    if not item:
+        return None
+    data, ts = item
+    if time.time() - ts < CACHE_DURATION:
+        return data
+    # expired
+    del cache[cache_key]
     return None
 
 def save_to_cache(cache_key, data):
-    """Save data to cache with timestamp"""
     cache[cache_key] = (data, time.time())
-    print(f"💾 Cached {cache_key}")
 
-# -------------------------------------------------------------
-# Core async worker: fetch goals for a single league
-# -------------------------------------------------------------
-async def fetch_league_goals(session, league_code, league_name, season):
-    """Fetch goals using understatapi library (same as your working script)"""
-    
-    # Convert season to string (understatapi expects string)
-    season_str = str(season)
-    
-    print(f"\n📌 Fetching {league_name} {season_str}-{int(season_str)+1}")
-    
+# ---------- Core synchronous fetcher (single league) ----------
+def fetch_league_goals_sync(league_code, league_name, season_str):
+    """
+    Synchronous fetch using UnderstatClient (keeps logic close to your working script).
+    Returns a dict: {"league": league_name, "goals": [...], "error": None}
+    """
     try:
-        # Use UnderstatClient (sync API, but we'll run it in executor to not block)
-        def fetch_data():
-            goals = []
-            with UnderstatClient() as understat:
-                # Get teams for the league
-                teams_data = understat.league(league=league_code).get_team_data(season=season_str)
-                team_names = [teams_data[team]['title'].replace(' ', '_') for team in teams_data]
-                
-                print(f"  Found {len(team_names)} teams")
-                
-                # Get all matches
-                all_matches = []
-                for team_name in team_names:
-                    try:
-                        team_matches = understat.team(team=team_name).get_match_data(season=season_str)
-                        all_matches.extend(team_matches)
-                    except Exception as e:
-                        print(f"  ⚠️ Could not fetch matches for {team_name}: {e}")
-                
-                # Deduplicate matches
-                unique_matches = list({match['id']: match for match in all_matches}.values())
-                print(f"  Found {len(unique_matches)} matches")
-                
-                # Fetch shots for each match
-                for idx, match_info in enumerate(unique_matches, 1):
-                    match_id = match_info['id']
-                    match_date = match_info.get('datetime', 'Unknown date')
-                    home_team = match_info['h']['title']
-                    away_team = match_info['a']['title']
-                    
-                    if idx % 10 == 0:
-                        print(f"  Processing match {idx}/{len(unique_matches)}")
-                    
-                    try:
-                        shots = understat.match(match=match_id).get_shot_data()
-                        all_shots = shots['h'] + shots['a']
-                        
-                        for shot in all_shots:
-                            if shot.get('result') == 'Goal':
-                                goals.append({
-                                    "id": shot.get('id'),
-                                    "x": float(shot.get('X', 0)),
-                                    "y": float(shot.get('Y', 0)),
-                                    "player": shot.get('player'),
-                                    "minute": int(shot.get('minute', 0)),
-                                    "match_id": match_id,
-                                    "team": shot.get('h_team') if shot.get('h_a') == 'h' else shot.get('a_team'),
-                                    "opponent": shot.get('a_team') if shot.get('h_a') == 'h' else shot.get('h_team'),
-                                    "xg": float(shot.get('xG', 0)),
-                                    "situation": shot.get('situation', 'Unknown'),
-                                    "shotType": shot.get('shotType', 'Unknown'),
-                                    "match_date": match_date,
-                                    "home_team": home_team,
-                                    "away_team": away_team
-                                })
-                    except Exception as e:
-                        print(f"  ⚠️ Error fetching shots for match {match_id}: {e}")
-                        continue
-            
-            return goals
-        
-        # Run the synchronous function in a thread pool to avoid blocking
-        loop = asyncio.get_event_loop()
-        all_goals = await loop.run_in_executor(None, fetch_data)
-        
-        print(f"✅ {league_name}: collected {len(all_goals)} goals")
-        return {"league": league_name, "goals": all_goals, "error": None, "is_mock": False}
-        
+        goals = []
+        with UnderstatClient() as understat:
+            teams_data = understat.league(league=league_code).get_team_data(season=season_str)
+            team_names = [teams_data[team]['title'].replace(' ', '_') for team in teams_data]
+
+            all_matches = []
+            for team_name in team_names:
+                try:
+                    team_matches = understat.team(team=team_name).get_match_data(season=season_str)
+                    all_matches.extend(team_matches)
+                except Exception as e:
+                    # non-fatal, continue with other teams
+                    print(f"Could not fetch matches for {team_name}: {e}")
+
+            # dedupe
+            unique_matches = list({m['id']: m for m in all_matches}.values())
+
+            for idx, match_info in enumerate(unique_matches, start=1):
+                match_id = match_info.get('id')
+                match_date = match_info.get('datetime', None)
+                home_team = match_info['h']['title'] if match_info.get('h') else None
+                away_team = match_info['a']['title'] if match_info.get('a') else None
+
+                try:
+                    shots = understat.match(match=match_id).get_shot_data()
+                    all_shots = shots.get('h', []) + shots.get('a', [])
+                    for shot in all_shots:
+                        if shot.get('result') == 'Goal':
+                            goals.append({
+                                "id": shot.get('id'),
+                                "x": float(shot.get('X', 0)) if shot.get('X') is not None else 0.0,
+                                "y": float(shot.get('Y', 0)) if shot.get('Y') is not None else 0.0,
+                                "player": shot.get('player'),
+                                "minute": int(shot.get('minute', 0)) if shot.get('minute') is not None else 0,
+                                "match_id": match_id,
+                                "team": shot.get('h_team') if shot.get('h_a') == 'h' else shot.get('a_team'),
+                                "opponent": shot.get('a_team') if shot.get('h_a') == 'h' else shot.get('h_team'),
+                                "xg": float(shot.get('xG', 0)) if shot.get('xG') is not None else 0.0,
+                                "situation": shot.get('situation'),
+                                "shotType": shot.get('shotType'),
+                                "match_date": match_date,
+                                "home_team": home_team,
+                                "away_team": away_team
+                            })
+                except Exception as e:
+                    print(f"Warning: could not fetch shots for match {match_id}: {e}")
+                    continue
+
+        return {"league": league_name, "goals": goals, "error": None, "is_mock": False}
+
     except Exception as e:
-        error_msg = str(e)
-        print(f"❌ ERROR fetching results for {league_name}: {error_msg}")
-        return {"league": league_name, "goals": [], "error": error_msg}
+        tb = traceback.format_exc()
+        print("ERROR in fetch_league_goals_sync:", e, tb)
+        return {"league": league_name, "goals": [], "error": str(e)}
 
-
-async def fetch_all_leagues(season, leagues=None):
-    # Convert season to string (understatapi expects string)
-    season_str = str(season)
-
-    if leagues is None:
-        leagues = list(LEAGUE_MAP.keys())
-
-    # Note: We don't need aiohttp session anymore since understatapi handles it
-    # But we'll keep this structure for parallel processing
-    tasks = []
-    for league_key in leagues:
-        code, name = LEAGUE_MAP[league_key]
-        # Pass None for session since we're not using it anymore
-        tasks.append(fetch_league_goals(None, code, name, season_str))
-
-    return await asyncio.gather(*tasks)
-
-
-# -------------------------------------------------------------
-# Highlights API Integration
-# -------------------------------------------------------------
-async def fetch_match_highlights_by_teams(home_team, away_team, date=None):
-    """Fetch highlights for a specific match by team names"""
-    
-    url = f"{HIGHLIGHTLY_BASE_URL}/highlights"
-    
-    headers = {
-        "Authorization": f"Bearer {HIGHLIGHTLY_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    params = {
-        "homeTeamName": home_team,
-        "awayTeamName": away_team,
-        "limit": 10
-    }
-    
-    if date:
-        params["date"] = date
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("data", [])
-                else:
-                    return []
-    except Exception as e:
-        print(f"⚠️ Error fetching match highlights: {e}")
-        return []
-
-
-async def enrich_goals_with_highlights(goals, league_key):
-    """Enrich goal data with match highlights"""
-    
-    matches = {}
-    for goal in goals:
-        match_key = f"{goal.get('home_team')}_{goal.get('away_team')}_{goal.get('match_date')}"
-        if match_key not in matches:
-            matches[match_key] = {
-                "home_team": goal.get("home_team"),
-                "away_team": goal.get("away_team"),
-                "date": goal.get("match_date", "").split("T")[0] if goal.get("match_date") else None,
-                "goals": []
-            }
-        matches[match_key]["goals"].append(goal)
-    
-    print(f"🎬 Enriching {len(goals)} goals from {len(matches)} matches with highlights...")
-    
-    highlights_cache = {}
-    
-    for match_key, match_data in matches.items():
-        home = match_data["home_team"]
-        away = match_data["away_team"]
-        date = match_data["date"]
-        
-        if not home or not away:
-            continue
-        
-        cache_key = f"{home}_{away}_{date}"
-        
-        if cache_key not in highlights_cache:
-            highlights = await fetch_match_highlights_by_teams(home, away, date)
-            highlights_cache[cache_key] = highlights
-            await asyncio.sleep(0.1)
-        
-        match_highlights = highlights_cache[cache_key]
-        
-        for goal in match_data["goals"]:
-            goal["match_highlights"] = match_highlights
-            goal["goal_highlights"] = []
-            player_name = goal.get("player", "").lower()
-            minute = goal.get("minute", 0)
-            
-            for highlight in match_highlights:
-                title = highlight.get("title", "").lower()
-                description = highlight.get("description", "").lower()
-                
-                if player_name in title or player_name in description:
-                    goal["goal_highlights"].append({
-                        "id": highlight.get("id"),
-                        "title": highlight.get("title"),
-                        "url": highlight.get("url"),
-                        "embedUrl": highlight.get("embedUrl"),
-                        "source": highlight.get("source"),
-                        "type": highlight.get("type"),
-                        "relevance": "player_match"
-                    })
-                elif f"{int(minute)}'" in title or f"{int(minute)} min" in title.lower():
-                    goal["goal_highlights"].append({
-                        "id": highlight.get("id"),
-                        "title": highlight.get("title"),
-                        "url": highlight.get("url"),
-                        "embedUrl": highlight.get("embedUrl"),
-                        "source": highlight.get("source"),
-                        "type": highlight.get("type"),
-                        "relevance": "minute_match"
-                    })
-    
-    print(f"✅ Enrichment complete")
-    return goals
-
-
-async def fetch_league_highlights(league_key, date=None, limit=40):
-    """Fetch highlights for a specific league"""
-    
-    if league_key not in HIGHLIGHTS_LEAGUE_MAP:
-        return {"error": "League not supported for highlights"}
-    
-    league_name = HIGHLIGHTS_LEAGUE_MAP[league_key]
-    url = f"{HIGHLIGHTLY_BASE_URL}/highlights"
-    
-    headers = {
-        "Authorization": f"Bearer {HIGHLIGHTLY_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    params = {
-        "leagueName": league_name,
-        "limit": limit,
-        "offset": 0
-    }
-    
-    if date:
-        params["date"] = date
-    
-    print(f"🎬 Fetching highlights for {league_name}")
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    highlights = data.get("data", [])
-                    print(f"✅ Found {len(highlights)} highlights for {league_name}")
-                    return {
-                        "league": league_name,
-                        "highlights": highlights,
-                        "pagination": data.get("pagination", {}),
-                        "error": None
-                    }
-                else:
-                    error_text = await response.text()
-                    error_msg = f"API returned status {response.status}: {error_text}"
-                    print(f"❌ {error_msg}")
-                    return {"league": league_name, "highlights": [], "error": error_msg}
-    except Exception as e:
-        print(f"❌ ERROR fetching highlights for {league_name}: {e}")
-        return {"league": league_name, "highlights": [], "error": str(e)}
-
-
-async def search_match_highlights(home_team, away_team, date=None):
-    """Search for highlights of a specific match"""
-    
-    url = f"{HIGHLIGHTLY_BASE_URL}/highlights"
-    
-    headers = {
-        "Authorization": f"Bearer {HIGHLIGHTLY_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    params = {
-        "homeTeamName": home_team,
-        "awayTeamName": away_team,
-        "limit": 10
-    }
-    
-    if date:
-        params["date"] = date
-    
-    print(f"🎬 Searching highlights for {home_team} vs {away_team}")
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    highlights = data.get("data", [])
-                    print(f"✅ Found {len(highlights)} highlights")
-                    return {
-                        "match": f"{home_team} vs {away_team}",
-                        "highlights": highlights,
-                        "error": None
-                    }
-                else:
-                    error_text = await response.text()
-                    error_msg = f"API returned status {response.status}: {error_text}"
-                    print(f"❌ {error_msg}")
-                    return {"highlights": [], "error": error_msg}
-    except Exception as e:
-        print(f"❌ ERROR searching match highlights: {e}")
-        return {"highlights": [], "error": str(e)}
-
-
-# -------------------------------------------------------------
-# AI Assistant with Gemini
-# -------------------------------------------------------------
-def get_data_summary():
-    """Get summary of available cached data for AI context"""
-    summary = {
-        "available_leagues": list(LEAGUE_MAP.keys()),
-        "cached_data": []
-    }
-    
-    for cache_key in cache.keys():
-        if "goals" in cache_key:
-            data, timestamp = cache[cache_key]
-            age_minutes = int((time.time() - timestamp) / 60)
-            summary["cached_data"].append({
-                "key": cache_key,
-                "age_minutes": age_minutes,
-                "goal_count": len(data.get("data", {}).get("goals", []))
-            })
-    
-    return summary
-
-async def ask_gemini_with_search(question):
-    """Ask Gemini with web search capabilities for all questions"""
-    
-    try:
-        # Initialize Gemini client
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        # Build a clean, professional prompt
-        system_context = """You are a professional football analytics expert. 
-
-Key guidelines for your responses:
-- Provide clear, direct answers without preambles like "According to..."
-- Use clean formatting without asterisks or markdown symbols
-- Be precise and factual
-- Use web search to get current, accurate information
-- Present statistics and data professionally
-- Keep responses concise but informative
-
-When answering:
-- State facts directly
-- Use numbers and statistics when relevant
-- Provide context when needed
-- Be authoritative but accessible"""
-        
-        user_prompt = f"{system_context}\n\nQuestion: {question}\n\nProvide a professional, well-formatted answer."
-        
-        # Generate response with search grounding enabled
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_prompt,
-            config={
-                "search_grounding": True  # Enable web search
-            }
-        )
-        
-        # Clean up the response text
-        answer_text = response.text
-        
-        # Remove common markdown symbols and clean formatting
-        answer_text = answer_text.replace("**", "")  # Remove bold
-        answer_text = answer_text.replace("*", "")   # Remove asterisks
-        answer_text = answer_text.replace("##", "")  # Remove headers
-        answer_text = answer_text.replace("#", "")   # Remove headers
-        
-        # Remove phrases like "According to the cache data"
-        phrases_to_remove = [
-            "According to the cache data,",
-            "Based on the cached data,",
-            "From the data provided,",
-            "According to the data,",
-            "Based on the available data,"
-        ]
-        for phrase in phrases_to_remove:
-            answer_text = answer_text.replace(phrase, "")
-        
-        # Clean up extra whitespace
-        answer_text = " ".join(answer_text.split())
-        answer_text = answer_text.strip()
-        
-        return {
-            "answer": answer_text,
-            "search_used": True,
-            "data_used": False
-        }
-    
-    except Exception as e:
-        print(f"❌ Gemini API error: {e}")
-        return {
-            "answer": f"I apologize, but I encountered an error: {str(e)}",
-            "search_used": False,
-            "data_used": False,
-            "error": str(e)
-        }
-
-
-# -------------------------------------------------------------
-# Flask Endpoints - Goals
-# -------------------------------------------------------------
-@app.route("/api/goals")
-def api_goals():
-    # Get season and convert to integer, default to 2025
-    season_param = request.args.get("season", DEFAULT_SEASON)
-    try:
-        season = int(season_param)
-    except (ValueError, TypeError):
-        season = 2025
-    
-    leagues = request.args.get("leagues")
-
-    if leagues:
-        leagues = [l.strip().lower() for l in leagues.split(",")]
-    else:
-        leagues = list(LEAGUE_MAP.keys())
-
-    results = asyncio.run(fetch_all_leagues(season, leagues))
-    return jsonify({"season": str(season), "data": results})
-
-
+# ---------- Flask routes ----------
 @app.route("/api/goals/<league>")
 def api_single_league(league):
-    # Get season and convert to integer, default to 2025
+    """
+    Main endpoint for single-league requests.
+    Params:
+      - season (optional)
+      - refresh=true (optional) to bypass cache
+      - mock=true (optional) to return mock data if available
+    """
     season_param = request.args.get("season", DEFAULT_SEASON)
     try:
         season = int(season_param)
     except (ValueError, TypeError):
-        season = 2025
-    
+        season = int(DEFAULT_SEASON)
+    season_str = str(season)
+
     force_refresh = request.args.get("refresh", "false").lower() == "true"
-    include_highlights = request.args.get("highlights", "false").lower() == "true"
     use_mock = request.args.get("mock", "false").lower() == "true"
 
     league_url = league.lower()
-    
     if league_url in URL_ALIASES:
         league_key = URL_ALIASES[league_url]
     else:
         league_key = league_url
-    
+
     if league_key not in LEAGUE_MAP:
-        return jsonify({
-            "error": f"Unknown league: {league}",
-            "valid_leagues": list(URL_ALIASES.keys())
-        }), 400
+        return jsonify({"error": f"Unknown league: {league}", "valid_leagues": list(URL_ALIASES.keys())}), 400
 
-    # Return mock data if requested
+    # Return mock data if requested and available
     if use_mock and league_key in MOCK_DATA:
-        print(f"📦 Returning mock data for {league_key}")
-        return jsonify({"season": str(season), "data": MOCK_DATA[league_key]})
+        return jsonify({"season": season_str, "data": MOCK_DATA[league_key]})
 
-    cache_key = get_cache_key(str(season), league_key, "goals_with_highlights" if include_highlights else "goals")
-    
+    cache_key = get_cache_key(season_str, league_key)
     if not force_refresh:
-        cached_data = get_from_cache(cache_key)
-        if cached_data is not None:
-            return jsonify(cached_data)
+        cached = get_from_cache(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
-    print(f"🔄 Fetching fresh data for {league_key}...")
-    results = asyncio.run(fetch_all_leagues(season, [league_key]))
-    
-    if include_highlights and results[0].get("goals"):
-        goals = results[0]["goals"]
-        enriched_goals = asyncio.run(enrich_goals_with_highlights(goals, league_key))
-        results[0]["goals"] = enriched_goals
-    
-    response_data = {"season": str(season), "data": results[0]}
-    save_to_cache(cache_key, response_data)
-    
+    # Fetch live (single-league) synchronously (UnderstatClient is synchronous)
+    league_code, league_name = LEAGUE_MAP[league_key]
+    result = fetch_league_goals_sync(league_code, league_name, season_str)
+
+    response_data = {"season": season_str, "data": result}
+    # only cache successful non-error results
+    if not result.get("error"):
+        save_to_cache(cache_key, response_data)
+
     return jsonify(response_data)
 
-
-# -------------------------------------------------------------
-# Flask Endpoints - Mock Data
-# -------------------------------------------------------------
 @app.route("/api/mock/<league>")
-def get_mock_data(league):
-    """Get mock data for instant loading"""
+def api_mock(league):
+    # simple mock endpoint
     league_url = league.lower()
-    
     if league_url in URL_ALIASES:
         league_key = URL_ALIASES[league_url]
     else:
         league_key = league_url
-    
-    # If we have loaded mock data, return it
+
     if league_key in MOCK_DATA:
         return jsonify({"season": DEFAULT_SEASON, "data": MOCK_DATA[league_key]})
-    
-    # Otherwise return a minimal fallback
-    fallback_data = {
-        "league": LEAGUE_MAP.get(league_key, ("Unknown", "Unknown"))[1],
-        "goals": [],
-        "is_mock": True,
-        "message": "Loading real data in background..."
-    }
-    return jsonify({"season": DEFAULT_SEASON, "data": fallback_data})
-
-
-# -------------------------------------------------------------
-# Flask Endpoints - Highlights
-# -------------------------------------------------------------
-@app.route("/api/highlights/<league>")
-def api_league_highlights(league):
-    """Get highlights for a specific league"""
-    force_refresh = request.args.get("refresh", "false").lower() == "true"
-    date = request.args.get("date")
-    limit = int(request.args.get("limit", 40))
-    
-    league_url = league.lower()
-    
-    if league_url in URL_ALIASES:
-        league_key = URL_ALIASES[league_url]
     else:
-        league_key = league_url
-    
-    if league_key not in HIGHLIGHTS_LEAGUE_MAP:
         return jsonify({
-            "error": f"Highlights not available for: {league}",
-            "available_leagues": list(HIGHLIGHTS_LEAGUE_MAP.keys())
-        }), 400
-    
-    cache_key = get_cache_key(date or "latest", league_key, "highlights")
-    
-    if not force_refresh:
-        cached_data = get_from_cache(cache_key)
-        if cached_data is not None:
-            return jsonify(cached_data)
-    
-    result = asyncio.run(fetch_league_highlights(league_key, date, limit))
-    save_to_cache(cache_key, result)
-    
-    return jsonify(result)
+            "season": DEFAULT_SEASON,
+            "data": {
+                "league": LEAGUE_MAP.get(league_key, ("Unknown", "Unknown"))[1],
+                "goals": [],
+                "is_mock": True,
+                "message": "No mock data available for this league."
+            }
+        })
 
-
-@app.route("/api/highlights/match")
-def api_match_highlights():
-    """Search for highlights of a specific match"""
-    home_team = request.args.get("homeTeam")
-    away_team = request.args.get("awayTeam")
-    date = request.args.get("date")
-    
-    if not home_team or not away_team:
-        return jsonify({
-            "error": "Both homeTeam and awayTeam parameters are required"
-        }), 400
-    
-    result = asyncio.run(search_match_highlights(home_team, away_team, date))
-    return jsonify(result)
-
-
-# -------------------------------------------------------------
-# Flask Endpoints - AI Assistant
-# -------------------------------------------------------------
-@app.route("/api/ai/ask", methods=["POST"])
-def ai_ask():
-    """Ask the AI assistant a question - now uses web search for all queries"""
-    data = request.get_json()
-    
-    if not data or "question" not in data:
-        return jsonify({"error": "Question is required"}), 400
-    
-    question = data["question"]
-    
-    # Use web search for all questions
-    result = asyncio.run(ask_gemini_with_search(question))
-    return jsonify(result)
-
-
-# -------------------------------------------------------------
-# Cache Management Endpoints
-# -------------------------------------------------------------
 @app.route("/api/cache/status")
 def cache_status():
-    """Check what's currently cached"""
-    cached_items = []
-    current_time = time.time()
-    
-    for cache_key, (data, timestamp) in cache.items():
-        age_seconds = current_time - timestamp
-        cached_items.append({
-            "key": cache_key,
-            "age_minutes": int(age_seconds / 60),
-            "expires_in_minutes": int((CACHE_DURATION - age_seconds) / 60),
-            "is_expired": age_seconds > CACHE_DURATION
+    items = []
+    now = time.time()
+    for key, (data, ts) in cache.items():
+        items.append({
+            "key": key,
+            "age_minutes": int((now - ts) / 60),
+            "expires_in_minutes": int((CACHE_DURATION - (now - ts)) / 60),
+            "is_expired": now - ts > CACHE_DURATION
         })
-    
-    return jsonify({
-        "total_cached": len(cache),
-        "cache_duration_minutes": int(CACHE_DURATION / 60),
-        "items": cached_items
-    })
-
+    return jsonify({"total_cached": len(cache), "items": items})
 
 @app.route("/api/cache/clear", methods=["POST"])
 def clear_cache():
-    """Clear all cached data"""
     count = len(cache)
     cache.clear()
-    return jsonify({"message": "Cache cleared successfully", "cleared_items": count})
+    return jsonify({"message": "Cache cleared", "cleared": count})
 
-
-@app.route("/api/cache/clear/<league>", methods=["POST"])
-def clear_league_cache(league):
-    """Clear cache for a specific league"""
-    season = str(request.args.get("season", DEFAULT_SEASON))
-    data_type = request.args.get("type", "goals")
-    
-    league_url = league.lower()
-    if league_url in URL_ALIASES:
-        league_key = URL_ALIASES[league_url]
-    else:
-        league_key = league_url
-    
-    cache_key = get_cache_key(season, league_key, data_type)
-    
-    if cache_key in cache:
-        del cache[cache_key]
-        return jsonify({"message": f"Cache cleared for {league_key}", "key": cache_key})
-    else:
-        return jsonify({"message": "No cache found", "key": cache_key})
-
-
-# -------------------------------------------------------------
-# Health Check
-# -------------------------------------------------------------
 @app.route("/api/health")
 def health_check():
-    """Simple health check endpoint"""
     return jsonify({
         "status": "healthy",
         "timestamp": time.time(),
         "cache_size": len(cache),
-        "mock_data_leagues": list(MOCK_DATA.keys()),
-        "features": {
-            "goals": True,
-            "highlights": bool(HIGHLIGHTLY_API_KEY),
-            "ai_assistant": bool(GEMINI_API_KEY),
-            "mock_data": len(MOCK_DATA) > 0
-        }
+        "mock_data_loaded": bool(MOCK_DATA)
     })
 
-
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
