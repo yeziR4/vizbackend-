@@ -3,11 +3,11 @@ import json
 import os
 from flask import Flask, jsonify, request
 import aiohttp
-from understat import Understat
 from flask_cors import CORS
 import time
 import datetime
 from google import genai
+from understatapi import UnderstatClient
 
 app = Flask(__name__)
 CORS(app)
@@ -21,7 +21,7 @@ HIGHLIGHTLY_API_KEY = os.environ.get("HIGHLIGHTLY_API_KEY", "your-api-key-here")
 HIGHLIGHTLY_BASE_URL = "https://api.highlightly.app/v1"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "your-gemini-api-key")
 
-DEFAULT_SEASON = "2025"
+DEFAULT_SEASON = "2025"  # Back to 2025 since understatapi supports it
 LEAGUE_MAP = {
     "epl": ("EPL", "Premier League"),
     "laliga": ("La_liga", "La Liga"),
@@ -122,84 +122,104 @@ def save_to_cache(cache_key, data):
 # Core async worker: fetch goals for a single league
 # -------------------------------------------------------------
 async def fetch_league_goals(session, league_code, league_name, season):
-    understat = Understat(session)
+    """Fetch goals using understatapi library (same as your working script)"""
     
-    # Convert season to integer if it's a string
+    # Convert season to string (understatapi expects string)
+    season_str = str(season)
+    
+    print(f"\n📌 Fetching {league_name} {season_str}-{int(season_str)+1}")
+    
     try:
-        season_int = int(season)
-    except (ValueError, TypeError):
-        print(f"⚠️ Invalid season value: {season}, using default 2025")
-        season_int = 2025
-
-    print(f"\n📌 Fetching {league_name} {season_int}-{season_int+1}")
-
-    try:
-        results = await understat.get_league_results(league_code, season_int)
+        # Use UnderstatClient (sync API, but we'll run it in executor to not block)
+        def fetch_data():
+            goals = []
+            with UnderstatClient() as understat:
+                # Get teams for the league
+                teams_data = understat.league(league=league_code).get_team_data(season=season_str)
+                team_names = [teams_data[team]['title'].replace(' ', '_') for team in teams_data]
+                
+                print(f"  Found {len(team_names)} teams")
+                
+                # Get all matches
+                all_matches = []
+                for team_name in team_names:
+                    try:
+                        team_matches = understat.team(team=team_name).get_match_data(season=season_str)
+                        all_matches.extend(team_matches)
+                    except Exception as e:
+                        print(f"  ⚠️ Could not fetch matches for {team_name}: {e}")
+                
+                # Deduplicate matches
+                unique_matches = list({match['id']: match for match in all_matches}.values())
+                print(f"  Found {len(unique_matches)} matches")
+                
+                # Fetch shots for each match
+                for idx, match_info in enumerate(unique_matches, 1):
+                    match_id = match_info['id']
+                    match_date = match_info.get('datetime', 'Unknown date')
+                    home_team = match_info['h']['title']
+                    away_team = match_info['a']['title']
+                    
+                    if idx % 10 == 0:
+                        print(f"  Processing match {idx}/{len(unique_matches)}")
+                    
+                    try:
+                        shots = understat.match(match=match_id).get_shot_data()
+                        all_shots = shots['h'] + shots['a']
+                        
+                        for shot in all_shots:
+                            if shot.get('result') == 'Goal':
+                                goals.append({
+                                    "id": shot.get('id'),
+                                    "x": float(shot.get('X', 0)),
+                                    "y": float(shot.get('Y', 0)),
+                                    "player": shot.get('player'),
+                                    "minute": int(shot.get('minute', 0)),
+                                    "match_id": match_id,
+                                    "team": shot.get('h_team') if shot.get('h_a') == 'h' else shot.get('a_team'),
+                                    "opponent": shot.get('a_team') if shot.get('h_a') == 'h' else shot.get('h_team'),
+                                    "xg": float(shot.get('xG', 0)),
+                                    "situation": shot.get('situation', 'Unknown'),
+                                    "shotType": shot.get('shotType', 'Unknown'),
+                                    "match_date": match_date,
+                                    "home_team": home_team,
+                                    "away_team": away_team
+                                })
+                    except Exception as e:
+                        print(f"  ⚠️ Error fetching shots for match {match_id}: {e}")
+                        continue
+            
+            return goals
+        
+        # Run the synchronous function in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        all_goals = await loop.run_in_executor(None, fetch_data)
+        
+        print(f"✅ {league_name}: collected {len(all_goals)} goals")
+        return {"league": league_name, "goals": all_goals, "error": None, "is_mock": False}
+        
     except Exception as e:
-        print(f"❌ ERROR fetching results for {league_name}: {e}")
-        return {"league": league_name, "goals": [], "error": str(e)}
-
-    all_goals = []
-
-    for match in results:
-        match_id = match.get("id")
-        if not match_id:
-            continue
-
-        try:
-            shots = await understat.get_match_shots(match_id)
-        except Exception as e:
-            print(f"⚠️ Could not fetch shots for match {match_id}: {e}")
-            continue
-
-        all_shots = shots["h"] + shots["a"]
-
-        for shot in all_shots:
-            if shot["result"] != "Goal":
-                continue
-
-            all_goals.append({
-                "id": shot["id"],
-                "x": float(shot["X"]),
-                "y": float(shot["Y"]),
-                "player": shot["player"],
-                "minute": shot["minute"],
-                "match_id": match_id,
-                "team": shot["h_team"] if shot["h_a"] == "h" else shot["a_team"],
-                "opponent": shot["a_team"] if shot["h_a"] == "h" else shot["h_team"],
-                "xg": float(shot["xG"]),
-                "situation": shot.get("situation", "Unknown"),
-                "shotType": shot.get("shotType", "Unknown"),
-                "match_date": match.get("datetime"),
-                "home_team": match.get("h", {}).get("title"),
-                "away_team": match.get("a", {}).get("title"),
-            })
-
-        await asyncio.sleep(0.2)
-
-    print(f"✅ {league_name}: collected {len(all_goals)} goals")
-    return {"league": league_name, "goals": all_goals, "error": None, "is_mock": False}
+        error_msg = str(e)
+        print(f"❌ ERROR fetching results for {league_name}: {error_msg}")
+        return {"league": league_name, "goals": [], "error": error_msg}
 
 
 async def fetch_all_leagues(season, leagues=None):
-    # Convert season to integer
-    try:
-        season_int = int(season)
-    except (ValueError, TypeError):
-        print(f"⚠️ Invalid season value: {season}, using default 2025")
-        season_int = 2025
+    # Convert season to string (understatapi expects string)
+    season_str = str(season)
 
     if leagues is None:
         leagues = list(LEAGUE_MAP.keys())
 
-    async with aiohttp.ClientSession() as session:
-        tasks = []
+    # Note: We don't need aiohttp session anymore since understatapi handles it
+    # But we'll keep this structure for parallel processing
+    tasks = []
+    for league_key in leagues:
+        code, name = LEAGUE_MAP[league_key]
+        # Pass None for session since we're not using it anymore
+        tasks.append(fetch_league_goals(None, code, name, season_str))
 
-        for league_key in leagues:
-            code, name = LEAGUE_MAP[league_key]
-            tasks.append(fetch_league_goals(session, code, name, season_int))
-
-        return await asyncio.gather(*tasks)
+    return await asyncio.gather(*tasks)
 
 
 # -------------------------------------------------------------
