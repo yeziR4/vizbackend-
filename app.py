@@ -51,8 +51,7 @@ def set_cache(key, value):
 @app.route("/api/goals/<league>")
 def get_goals(league):
     """
-    Always returns the mock Premier League data.
-    The <league> argument is ignored for now (for your screenshots).
+    Always returns mock Premier League data.
     """
 
     force_refresh = request.args.get("refresh", "false").lower() == "true"
@@ -69,7 +68,8 @@ def get_goals(league):
         "data": {
             "league": "Premier League",
             "goals": MOCK_GOALS,
-            "is_mock": True
+            "is_mock": True,
+            "error": None    # ✅ required by frontend
         }
     }
 
